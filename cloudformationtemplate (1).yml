@@ -1,0 +1,184 @@
+#FIRST PART(Run this first)
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Assignment4Template"
+Resources:
+  #S3 BUCKETS
+  LambdaZipsBucket: #S3 bucket to hold + create the lambda
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: lambdazipsbucket-am11449-cf
+  SageMakerLambdaBucket: #S3 bucket for sagemaker files
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: smlambda-workshop-bucket-am11449-cf
+  EmailStore: #S3 bucket for sagemaker files
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: emailstore-am11449-cf
+  BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      PolicyDocument:
+        Id: EmailStorePolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowSESPuts
+            Effect: Allow
+            Principal: 
+              Service: ses.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref EmailStore
+                - /*
+      Bucket: !Ref EmailStore
+  #SES IDENTITY 
+  SESEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: testcf@mail.com
+  SESRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties: 
+      RuleSetName: ReceiptRuleSet
+  SESReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    Properties: 
+      Rule: 
+        Name:  ReceiptRule
+        Actions: 
+          - S3Action: 
+              BucketName: !Ref EmailStore
+        Enabled: true
+        ScanEnabled: true
+      RuleSetName: ReceiptRuleSet
+  #SAGEMAKER
+  Notebook:
+    Type: AWS::SageMaker::NotebookInstance
+    Properties: 
+      DirectInternetAccess: Enabled
+      InstanceType: ml.t2.medium
+      NotebookInstanceName: notebook-instance-cf
+      PlatformIdentifier: notebook-al2-v1
+      RoleArn: !GetAtt SageMakerExecutionRole.Arn
+      RootAccess: Enabled
+      VolumeSizeInGB: 5
+  Model:
+    Type: "AWS::SageMaker::Model"
+    Properties:
+      ModelName: sms-spam-classifier-mxnet-model
+      PrimaryContainer:
+        ContainerHostname: Container1
+        Image: "520713654638.dkr.ecr.us-east-1.amazonaws.com/sagemaker-mxnet:1.2-cpu-py3" #This might need to be looked at again
+        Mode: SingleModel
+        Environment: {
+          "SAGEMAKER_CONTAINER_LOG_LEVEL": 20,
+          "SAGEMAKER_PROGRAM": "sms_spam_classifier_mxnet_script.py",
+          "SAGEMAKER_REGION": "us-east-1",
+          "SAGEMAKER_SUBMIT_DIRECTORY": "s3://smlambda-workshop-am11449/sms-spam-classifier/code/sms-spam-classifier-mxnet-2022-11-29-22-07-55-070/source/sourcedir.tar.gz" #The specific path needs looking at
+        }
+        ModelDataUrl: s3://smlambda-workshop-am11449/sms-spam-classifier/output/sms-spam-classifier-mxnet-2022-11-29-22-07-55-070/output/model.tar.gz #The specific path needs looking at
+      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+  EndpointConfig:
+    Type: "AWS::SageMaker::EndpointConfig"
+    Properties:
+      EndpointConfigName: sms-spam-classifier-mxnet-endpointconfig
+      ProductionVariants:
+        - InitialInstanceCount: 1
+          InitialVariantWeight: 1.0
+          InstanceType: ml.t2.medium	
+          ModelName: !GetAtt Model.ModelName
+          VariantName: !GetAtt Model.ModelName
+  # Endpoint:
+  #   Type: AWS::SageMaker::Endpoint
+  #   Properties: 
+  #     EndpointName: sms-spam-classifier-mxnet-endpoint
+  #     EndpointConfigName: sms-spam-classifier-mxnet-endpointconfig
+#IAM ROLES
+  #SAGEMAKER ROLES
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SageMakerExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "SageMakerCustomExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: 
+                    - s3:ListBucket
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:DeleteObject
+                Resource: "*" #This can be limited further. Set to * for ease 
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerCanvasFullAccess
+      Path: /
+
+#SECOND PART (Run this after inserting the lambda code into the correct S3 bucket)
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Assignment4Template"
+Resources:
+#LAMBDA
+  FeedToModelLambda: 
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: FeedToModelLambdaCF
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt S3ReadOnlyExecutionRole.Arn
+      Layers: 
+        - arn:aws:lambda:us-east-1:668099181075:layer:AWSLambda-Python38-SciPy1x:107
+      Code:
+        S3Bucket: lambdazipsbucket-am11449-cf
+        S3Key: lambda.zip
+#LAMBDA ROLES
+  S3ReadOnlyExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: S3ReadOnlyExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "S3ReadOnlyCustomExecutionRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: 
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                    - s3:GetObject
+                Resource: "*" #This can be limited further. Set to * for ease 
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSESFullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Path: /
+  
